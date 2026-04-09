@@ -5,6 +5,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
+import * as FileSystem from 'expo-file-system/legacy';
 import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -136,6 +137,16 @@ const UploadReport = () => {
     }
   };
 
+  const convertToBase64 = async (uri) => {
+    const base64 = await FileSystem.readAsStringAsync(uri, {
+      encoding: 'base64',
+    });
+    // Detect image type from uri extension (default to jpeg)
+    const ext = uri.split('.').pop()?.toLowerCase().split('?')[0];
+    const mimeType = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
+    return `data:${mimeType};base64,${base64}`;
+  };
+
   const checkImageQuality = (imageAsset) => {
     const { width, height, fileSize } = imageAsset;
     if (width < 300 || height < 300) {
@@ -151,12 +162,13 @@ const UploadReport = () => {
 
   const pickImage = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, quality: 1,
+      mediaTypes: ['images'], allowsEditing: true, quality: 1,
     });
     if (!result.canceled) {
       const selected = result.assets[0];
       if (checkImageQuality(selected)) {
-        setImage(selected.uri);
+        const base64Image = await convertToBase64(selected.uri);
+        setImage(base64Image);
         Alert.alert('✅ Image Accepted', 'Image is clear and ready to upload!');
       }
     }
@@ -169,12 +181,13 @@ const UploadReport = () => {
       return;
     }
     const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, quality: 1,
+      mediaTypes: ['images'], allowsEditing: true, quality: 1,
     });
     if (!result.canceled) {
       const selected = result.assets[0];
       if (checkImageQuality(selected)) {
-        setImage(selected.uri);
+        const base64Image = await convertToBase64(selected.uri);
+        setImage(base64Image);
         Alert.alert('✅ Image Accepted', 'Image is clear and ready to upload!');
       }
     }
