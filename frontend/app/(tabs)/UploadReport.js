@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
-import * as FileSystem from 'expo-file-system/legacy';
+import * as ImageManipulator from 'expo-image-manipulator';
 import * as Location from 'expo-location';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -13,6 +13,10 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import BottomNav from '../../components/BottomNav';
 import { useAlerts } from '../../contexts/AlertContext.js';
 import AlertTestButton from '../../components/AlertTestButton';
+
+// ✅ Cloudinary Configuration - REPLACE WITH YOUR ACTUAL VALUES
+const CLOUDINARY_CLOUD_NAME = 'dlkjgegss'; // Replace with your cloud name
+const CLOUDINARY_UPLOAD_PRESET = 'fyp-sdp2'; // Replace with your upload preset
 
 // ✅ Open-Meteo — 100% FREE | No API Key
 const getWeatherInfo = (code) => {
@@ -74,6 +78,7 @@ const UploadReport = () => {
   const router = useRouter();
   const { addHighAlert, addNormalAlert } = useAlerts();
   const [image, setImage]                     = useState(null);
+  const [uploading, setUploading]             = useState(false); // New state for upload progress
   const [specieName, setSpecieName]           = useState('');
   const [selectedHealth, setSelectedHealth]   = useState(null);
   const [location, setLocation]               = useState(null);
@@ -137,16 +142,6 @@ const UploadReport = () => {
     }
   };
 
-  const convertToBase64 = async (uri) => {
-    const base64 = await FileSystem.readAsStringAsync(uri, {
-      encoding: 'base64',
-    });
-    // Detect image type from uri extension (default to jpeg)
-    const ext = uri.split('.').pop()?.toLowerCase().split('?')[0];
-    const mimeType = ext === 'png' ? 'image/png' : ext === 'gif' ? 'image/gif' : 'image/jpeg';
-    return `data:${mimeType};base64,${base64}`;
-  };
-
   const checkImageQuality = (imageAsset) => {
     const { width, height, fileSize } = imageAsset;
     if (width < 300 || height < 300) {
@@ -162,13 +157,12 @@ const UploadReport = () => {
 
   const pickImage = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'], allowsEditing: true, quality: 1,
+      mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, quality: 1,
     });
     if (!result.canceled) {
       const selected = result.assets[0];
       if (checkImageQuality(selected)) {
-        const base64Image = await convertToBase64(selected.uri);
-        setImage(base64Image);
+        setImage(selected.uri);
         Alert.alert('✅ Image Accepted', 'Image is clear and ready to upload!');
       }
     }
@@ -181,13 +175,12 @@ const UploadReport = () => {
       return;
     }
     const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ['images'], allowsEditing: true, quality: 1,
+      mediaTypes: ImagePicker.MediaTypeOptions.Images, allowsEditing: true, quality: 1,
     });
     if (!result.canceled) {
       const selected = result.assets[0];
       if (checkImageQuality(selected)) {
-        const base64Image = await convertToBase64(selected.uri);
-        setImage(base64Image);
+        setImage(selected.uri);
         Alert.alert('✅ Image Accepted', 'Image is clear and ready to upload!');
       }
     }
@@ -198,74 +191,141 @@ const UploadReport = () => {
     setSpecieName('Identified Specie Name');
   };
 
+  // ✅ NEW FUNCTION: Upload image to Cloudinary
+  const uploadImageToCloudinary = async (imageUri) => {
+    try {
+      // Compress image for faster upload and to stay within free tier limits
+      const compressed = await ImageManipulator.manipulateAsync(
+        imageUri,
+        [{ resize: { width: 1200 } }], // Reasonable size for reports
+        { compress: 0.7, format: ImageManipulator.SaveFormat.JPEG }
+      );
+
+      // Create form data for Cloudinary upload
+      const formData = new FormData();
+      formData.append('file', {
+        uri: compressed.uri,
+        type: 'image/jpeg',
+        name: `wildlife-report-${Date.now()}.jpg`,
+      });
+      formData.append('upload_preset', CLOUDINARY_UPLOAD_PRESET);
+      formData.append('folder', 'wildlife_reports'); // Optional: organize in folders
+
+      // Upload to Cloudinary
+      const response = await fetch(
+        `https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`,
+        {
+          method: 'POST',
+          body: formData,
+        }
+      );
+
+      const data = await response.json();
+      
+      if (!response.ok) {
+        throw new Error(data.error?.message || 'Upload to Cloudinary failed');
+      }
+
+      console.log('✅ Image uploaded to Cloudinary:', data.secure_url);
+      return data.secure_url; // This is the public URL to store in database
+    } catch (error) {
+      console.error('❌ Cloudinary upload error:', error);
+      throw error;
+    }
+  };
+
   const handleUpload = async () => {
     if (!image || !specieName || !selectedHealth) {
       Alert.alert('Incomplete', 'Please fill all required fields.');
       return;
     }
-    const userId   = await AsyncStorage.getItem('userId');
-    const username = await AsyncStorage.getItem('username');
-    const reportData = {
-      image, specieName,
-      healthStatus: selectedHealth,
-      location, timestamp,
-      userId: userId || 'anonymous',
-      username: username || 'Anonymous User',
-      weatherConditions: weather ? {
-        temperature:  `${weather.temperature}°C`,
-        feelsLike:    `${weather.feelsLike}°C`,
-        condition:     weather.condition,
-        description:   weather.description,
-        humidity:     `${weather.humidity}%`,
-        windSpeed:    `${weather.windSpeed} m/s`,
-        visibility:   `${weather.visibility} km`,
-        pressure:     `${weather.pressure} hPa`,
-        capturedAt:    weather.capturedAt,
-        researchNote:  weather.researchNote,
-        behaviorHint:  weather.behaviorHint,
-      } : null,
-    };
-    Alert.alert('Confirm Upload', 'Are you sure you want to upload this report?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Upload',
-        onPress: async () => {
-          try {
-            const API_URL = 'http://192.168.100.2:5000';
-            const response = await fetch(`${API_URL}/api/reports`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(reportData),
-            });
-            const result = await response.json();
-            if (response.ok) {
-              // Trigger high alert for injured animals
-              if (selectedHealth === 'Injured') {
-                addHighAlert(
-                  '🚨 INJURED ANIMAL REPORTED',
-                  `${specieName} needs immediate attention! Location: ${location?.latitude?.toFixed(4)}, ${location?.longitude?.toFixed(4)}`,
-                  result.reportId
-                );
+
+    setUploading(true); // Start uploading state
+
+    try {
+      // 1. First upload image to Cloudinary
+      Alert.alert('Uploading', 'Uploading image to cloud...');
+      const imageUrl = await uploadImageToCloudinary(image);
+      
+      // 2. Get user info from AsyncStorage
+      const userId = await AsyncStorage.getItem('userId');
+      const username = await AsyncStorage.getItem('username');
+      
+      // 3. Prepare report data with Cloudinary URL instead of local URI
+      const reportData = {
+        image: imageUrl, // ✅ This is now a public Cloudinary URL!
+        specieName,
+        healthStatus: selectedHealth,
+        location, 
+        timestamp,
+        userId: userId || 'anonymous',
+        username: username || 'Anonymous User',
+        weatherConditions: weather ? {
+          temperature:  `${weather.temperature}°C`,
+          feelsLike:    `${weather.feelsLike}°C`,
+          condition:     weather.condition,
+          description:   weather.description,
+          humidity:     `${weather.humidity}%`,
+          windSpeed:    `${weather.windSpeed} m/s`,
+          visibility:   `${weather.visibility} km`,
+          pressure:     `${weather.pressure} hPa`,
+          capturedAt:    weather.capturedAt,
+          researchNote:  weather.researchNote,
+          behaviorHint:  weather.behaviorHint,
+        } : null,
+      };
+
+      // 4. Confirm upload
+      Alert.alert('Confirm Upload', 'Are you sure you want to upload this report?', [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Upload',
+          onPress: async () => {
+            try {
+              const API_URL = 'http://192.168.100.2:5000';
+              const response = await fetch(`${API_URL}/api/reports`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(reportData),
+              });
+              
+              const result = await response.json();
+              
+              if (response.ok) {
+                // Trigger alerts based on health status
+                if (selectedHealth === 'Injured') {
+                  addHighAlert(
+                    '🚨 INJURED ANIMAL REPORTED',
+                    `${specieName} needs immediate attention! Location: ${location?.latitude?.toFixed(4)}, ${location?.longitude?.toFixed(4)}`,
+                    result.reportId
+                  );
+                } else {
+                  addNormalAlert(
+                    '✅ Wildlife Report Submitted',
+                    `${specieName} sighting reported successfully`
+                  );
+                }
+                
+                Alert.alert('Success', 'Report uploaded successfully!', [
+                  { text: 'OK', onPress: () => router.push('/(tabs)/ReportsFeed') },
+                ]);
               } else {
-                // Trigger normal alert for other reports
-                addNormalAlert(
-                  '✅ Wildlife Report Submitted',
-                  `${specieName} sighting reported successfully`
-                );
+                Alert.alert('Error', 'Failed to upload report. Please try again.');
               }
-              Alert.alert('Success', 'Report uploaded successfully!', [
-                { text: 'OK', onPress: () => router.push('/(tabs)/ReportsFeed') },
-              ]);
-            } else {
-              Alert.alert('Error', 'Failed to upload report. Please try again.');
+            } catch (error) {
+              console.error('Upload error:', error);
+              Alert.alert('Connection Error', 'Could not connect to server.');
+            } finally {
+              setUploading(false);
             }
-          } catch (error) {
-            console.error('Upload error:', error);
-            Alert.alert('Connection Error', 'Could not connect to server.');
-          }
+          },
         },
-      },
-    ]);
+      ]);
+    } catch (error) {
+      Alert.alert('Upload Failed', 'Failed to upload image to cloud. Please try again.');
+      console.error('Upload error:', error);
+      setUploading(false);
+    }
   };
 
   // Define WeatherMetric component and styles BEFORE return
@@ -325,7 +385,6 @@ const UploadReport = () => {
     },
     aiText: { fontWeight: '700', fontSize: 13 },
 
-    // ── Health Status — simple radio circles ──
     radioContainer: { flexDirection: 'row', flexWrap: 'wrap' },
     radioOption:    { flexDirection: 'row', alignItems: 'center', width: '50%', marginVertical: 6 },
     radioCircle:    { width: 20, height: 20, borderRadius: 10, borderWidth: 2, borderColor: '#8f8d8d', marginRight: 10 },
@@ -411,10 +470,37 @@ const UploadReport = () => {
       shadowOpacity: 0.3, shadowRadius: 8, elevation: 4,
     },
     uploadButtonText: { fontWeight: '800', fontSize: 16, color: '#1a1a1a' },
+    disabledButton: {
+      opacity: 0.5,
+    },
+    uploadingContainer: {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      backgroundColor: 'rgba(255,255,255,0.9)',
+      justifyContent: 'center',
+      alignItems: 'center',
+      zIndex: 1000,
+    },
+    uploadingText: {
+      marginTop: 10,
+      fontSize: 16,
+      color: '#1B5E20',
+      fontWeight: '600',
+    },
   });
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
+      {/* Uploading Overlay */}
+      {uploading && (
+        <View style={styles.uploadingContainer}>
+          <ActivityIndicator size="large" color="#1B5E20" />
+          <Text style={styles.uploadingText}>Uploading image to cloud...</Text>
+        </View>
+      )}
 
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.push('/(tabs)/HomeScreen')}>
@@ -433,12 +519,12 @@ const UploadReport = () => {
             <Text style={styles.sectionTitle}>Upload Picture / Video</Text>
           </View>
           <View style={styles.imageOptions}>
-            <TouchableOpacity style={styles.optionButton} onPress={pickFromCamera}>
+            <TouchableOpacity style={styles.optionButton} onPress={pickFromCamera} disabled={uploading}>
               <View style={styles.optionIconBox}><Ionicons name="camera-outline" size={26} color="#2E7D32" /></View>
               <Text style={styles.optionText}>Camera</Text>
             </TouchableOpacity>
             <View style={styles.optionDivider} />
-            <TouchableOpacity style={styles.optionButton} onPress={pickImage}>
+            <TouchableOpacity style={styles.optionButton} onPress={pickImage} disabled={uploading}>
               <View style={styles.optionIconBox}><Ionicons name="image-outline" size={26} color="#2E7D32" /></View>
               <Text style={styles.optionText}>Gallery</Text>
             </TouchableOpacity>
@@ -459,8 +545,9 @@ const UploadReport = () => {
               style={styles.input}
               value={specieName}
               onChangeText={setSpecieName}
+              editable={!uploading}
             />
-            <TouchableOpacity onPress={identifySpecie} style={styles.aiButton}>
+            <TouchableOpacity onPress={identifySpecie} style={styles.aiButton} disabled={uploading}>
               <Ionicons name="scan" size={18} color="#000" />
               <Text style={styles.aiText}>AI Identify</Text>
             </TouchableOpacity>
@@ -479,6 +566,7 @@ const UploadReport = () => {
                 key={option}
                 style={styles.radioOption}
                 onPress={() => setSelectedHealth(option)}
+                disabled={uploading}
               >
                 <View style={[styles.radioCircle, selectedHealth === option && styles.radioSelected]} />
                 <Text style={styles.radioLabel}>{option}</Text>
@@ -522,7 +610,7 @@ const UploadReport = () => {
               <Text style={styles.weatherHeaderTitle}>Wildlife Weather Context</Text>
               <Text style={styles.weatherHeaderSub}>Helps analyze animal behavior & improves research accuracy</Text>
             </View>
-            <TouchableOpacity onPress={refreshWeather} style={styles.refreshBtn}>
+            <TouchableOpacity onPress={refreshWeather} style={styles.refreshBtn} disabled={uploading}>
               <Ionicons name="refresh" size={16} color="#fff" />
             </TouchableOpacity>
           </View>
@@ -587,9 +675,13 @@ const UploadReport = () => {
         </View>
 
         {/* ══ 6. Upload Button ══ */}
-        <TouchableOpacity style={styles.uploadButton} onPress={handleUpload}>
+        <TouchableOpacity 
+          style={[styles.uploadButton, uploading && styles.disabledButton]} 
+          onPress={handleUpload}
+          disabled={uploading}
+        >
           <Ionicons name="cloud-upload" size={20} color="#000" />
-          <Text style={styles.uploadButtonText}>  Submit Wildlife Report</Text>
+          <Text style={styles.uploadButtonText}>  {uploading ? 'UPLOADING...' : 'Submit Wildlife Report'}</Text>
         </TouchableOpacity>
 
         <View style={{ height: 10 }} />
